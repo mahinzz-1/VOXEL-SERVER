@@ -1,25 +1,18 @@
-const http = require('http');
 const { WebSocketServer } = require('ws');
 
-const PORT = process.env.PORT || 19130;
-
-const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('WebSocket Server Running');
-});
-
-const wss = new WebSocketServer({ server });
-
+const wss = new WebSocketServer({ port: 19130, host: '127.0.0.1' });
 const players = {};
 const world = {};
 
 function initWorld() {
-    for (let x = -12; x < 12; x++) {
-        for (let z = -12; z < 12; z++) {
-            const height = Math.floor(Math.sin(x * 0.15) * Math.cos(z * 0.15) * 3 + 4);
-            for (let y = 0; y <= height; y++) {
-                const type = y === height ? 'grass' : (y > height - 3 ? 'dirt' : 'stone');
-                world[`${x},${y},${z}`] = type;
+    for (let x = -15; x <= 15; x++) {
+        for (let z = -15; z <= 15; z++) {
+            world[`${x},4,${z}`] = (Math.abs(x) === 15 || Math.abs(z) === 15) ? 'wood' : 'stone';
+            if (Math.abs(x) === 14 && Math.abs(z) === 14) {
+                for (let y = 5; y <= 9; y++) {
+                    world[`${x},${y},${z}`] = 'wood';
+                }
+                world[`${x},10,${z}`] = 'grass';
             }
         }
     }
@@ -29,23 +22,20 @@ initWorld();
 wss.on('connection', (ws) => {
     const playerId = Math.random().toString(36).substring(2, 9);
 
-    console.log('Client connected:', playerId);
-
     ws.on('message', (message) => {
         try {
             const packet = JSON.parse(message);
-
             switch (packet.type) {
-
                 case 'Handshake':
-                    players[playerId] = {
-                        x: 0.5,
-                        y: 16.61,
-                        z: 0.5,
-                        yaw: 0,
-                        pitch: 0,
+                    players[playerId] = { 
+                        x: 0.5, 
+                        y: 16.61, 
+                        z: 0.5, 
+                        yaw: 0, 
+                        pitch: 0, 
                         activeBlock: 'grass',
-                        name: packet.name
+                        name: packet.name,
+                        health: 20
                     };
 
                     ws.send(JSON.stringify({
@@ -66,18 +56,15 @@ wss.on('connection', (ws) => {
                         id: playerId,
                         name: packet.name
                     });
-
                     break;
 
                 case 'PlayerPosition':
                     if (players[playerId]) {
-                        Object.assign(players[playerId], {
-                            x: packet.x,
-                            y: packet.y,
-                            z: packet.z,
-                            yaw: packet.yaw,
-                            pitch: packet.pitch
-                        });
+                        players[playerId].x = packet.x;
+                        players[playerId].y = packet.y;
+                        players[playerId].z = packet.z;
+                        players[playerId].yaw = packet.yaw;
+                        players[playerId].pitch = packet.pitch;
                     }
                     break;
 
@@ -87,7 +74,6 @@ wss.on('connection', (ws) => {
 
                 case 'PlayerPlaceBlock':
                     world[`${packet.x},${packet.y},${packet.z}`] = packet.blockType;
-
                     broadcast({
                         type: 'PlayerPlaceBlock',
                         x: packet.x,
@@ -99,7 +85,6 @@ wss.on('connection', (ws) => {
 
                 case 'PlayerBreakBlock':
                     delete world[`${packet.x},${packet.y},${packet.z}`];
-
                     broadcast({
                         type: 'PlayerBreakBlock',
                         x: packet.x,
@@ -124,6 +109,45 @@ wss.on('connection', (ws) => {
                         });
                     }
                     break;
+
+                case 'PlayerHit':
+                    const attacker = players[playerId];
+                    const target = players[packet.targetId];
+                    if (attacker && target) {
+                        target.health -= 4;
+                        if (target.health <= 0) {
+                            target.health = 20;
+                            target.x = 0.5;
+                            target.y = 16.61;
+                            target.z = 0.5;
+                            broadcast({
+                                type: 'PlayerRespawn',
+                                id: packet.targetId,
+                                x: 0.5,
+                                y: 16.61,
+                                z: 0.5,
+                                spectator: false
+                            });
+                            broadcast({
+                                type: 'PlayerSendMessage',
+                                id: 'system',
+                                name: 'SYSTEM',
+                                message: `${attacker.name} killed ${target.name}!`
+                            });
+                        } else {
+                            broadcast({
+                                type: 'PlayerHealth',
+                                id: packet.targetId,
+                                health: target.health
+                            });
+                        }
+                        broadcast({
+                            type: 'PlayerHit',
+                            attackerId: playerId,
+                            targetId: packet.targetId
+                        });
+                    }
+                    break;
             }
         } catch (e) {
             console.error(e);
@@ -136,9 +160,8 @@ wss.on('connection', (ws) => {
     });
 });
 
-function broadcast(data) {
+function broadcast(data, excludeId = null) {
     const payload = JSON.stringify(data);
-
     wss.clients.forEach((client) => {
         if (client.readyState === 1) {
             client.send(payload);
@@ -147,12 +170,11 @@ function broadcast(data) {
 }
 
 setInterval(() => {
-    broadcast({
+    const tickData = {
         type: 'Tick',
         players: Object.keys(players).map(id => ({ id, ...players[id] }))
-    });
+    };
+    broadcast(tickData);
 }, 50);
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
-});
+console.log('Multiplayer Game Server running on ws://127.0.0.1:19130');
