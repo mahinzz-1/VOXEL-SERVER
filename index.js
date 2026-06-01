@@ -4,11 +4,12 @@ const { WebSocketServer } = require('ws');
 const PORT = process.env.PORT || 19130;
 
 const server = http.createServer((req, res) => {
-    res.writeHead(200);
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('WebSocket Server Running');
 });
 
-const wss = new WebSocketServer({ port: 19130, host: '127.0.0.1' });
+const wss = new WebSocketServer({ server });
+
 const players = {};
 const world = {};
 
@@ -16,6 +17,7 @@ function initWorld() {
     for (let x = -15; x <= 15; x++) {
         for (let z = -15; z <= 15; z++) {
             world[`${x},4,${z}`] = (Math.abs(x) === 15 || Math.abs(z) === 15) ? 'wood' : 'stone';
+
             if (Math.abs(x) === 14 && Math.abs(z) === 14) {
                 for (let y = 5; y <= 9; y++) {
                     world[`${x},${y},${z}`] = 'wood';
@@ -25,6 +27,7 @@ function initWorld() {
         }
     }
 }
+
 initWorld();
 
 wss.on('connection', (ws) => {
@@ -33,14 +36,15 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         try {
             const packet = JSON.parse(message);
+
             switch (packet.type) {
                 case 'Handshake':
-                    players[playerId] = { 
-                        x: 0.5, 
-                        y: 16.61, 
-                        z: 0.5, 
-                        yaw: 0, 
-                        pitch: 0, 
+                    players[playerId] = {
+                        x: 0.5,
+                        y: 16.61,
+                        z: 0.5,
+                        yaw: 0,
+                        pitch: 0,
                         activeBlock: 'grass',
                         name: packet.name,
                         health: 20
@@ -49,8 +53,11 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({
                         type: 'PlayerJoin',
                         id: playerId,
-                        world: world,
-                        players: Object.keys(players).map(id => ({ id, ...players[id] }))
+                        world,
+                        players: Object.keys(players).map(id => ({
+                            id,
+                            ...players[id]
+                        }))
                     }));
 
                     broadcast({
@@ -64,6 +71,7 @@ wss.on('connection', (ws) => {
                         id: playerId,
                         name: packet.name
                     });
+
                     break;
 
                 case 'PlayerPosition':
@@ -77,11 +85,15 @@ wss.on('connection', (ws) => {
                     break;
 
                 case 'PlayerJump':
-                    broadcast({ type: 'PlayerJump', id: playerId }, playerId);
+                    broadcast({
+                        type: 'PlayerJump',
+                        id: playerId
+                    }, playerId);
                     break;
 
                 case 'PlayerPlaceBlock':
                     world[`${packet.x},${packet.y},${packet.z}`] = packet.blockType;
+
                     broadcast({
                         type: 'PlayerPlaceBlock',
                         x: packet.x,
@@ -93,6 +105,7 @@ wss.on('connection', (ws) => {
 
                 case 'PlayerBreakBlock':
                     delete world[`${packet.x},${packet.y},${packet.z}`];
+
                     broadcast({
                         type: 'PlayerBreakBlock',
                         x: packet.x,
@@ -121,13 +134,16 @@ wss.on('connection', (ws) => {
                 case 'PlayerHit':
                     const attacker = players[playerId];
                     const target = players[packet.targetId];
+
                     if (attacker && target) {
                         target.health -= 4;
+
                         if (target.health <= 0) {
                             target.health = 20;
                             target.x = 0.5;
                             target.y = 16.61;
                             target.z = 0.5;
+
                             broadcast({
                                 type: 'PlayerRespawn',
                                 id: packet.targetId,
@@ -136,6 +152,7 @@ wss.on('connection', (ws) => {
                                 z: 0.5,
                                 spectator: false
                             });
+
                             broadcast({
                                 type: 'PlayerSendMessage',
                                 id: 'system',
@@ -149,6 +166,7 @@ wss.on('connection', (ws) => {
                                 health: target.health
                             });
                         }
+
                         broadcast({
                             type: 'PlayerHit',
                             attackerId: playerId,
@@ -157,19 +175,24 @@ wss.on('connection', (ws) => {
                     }
                     break;
             }
-        } catch (e) {
-            console.error(e);
+        } catch (err) {
+            console.error('Packet Error:', err);
         }
     });
 
     ws.on('close', () => {
         delete players[playerId];
-        broadcast({ type: 'leave', id: playerId });
+
+        broadcast({
+            type: 'leave',
+            id: playerId
+        });
     });
 });
 
 function broadcast(data, excludeId = null) {
     const payload = JSON.stringify(data);
+
     wss.clients.forEach((client) => {
         if (client.readyState === 1) {
             client.send(payload);
@@ -178,11 +201,15 @@ function broadcast(data, excludeId = null) {
 }
 
 setInterval(() => {
-    const tickData = {
+    broadcast({
         type: 'Tick',
-        players: Object.keys(players).map(id => ({ id, ...players[id] }))
-    };
-    broadcast(tickData);
+        players: Object.keys(players).map(id => ({
+            id,
+            ...players[id]
+        }))
+    });
 }, 50);
 
-console.log('Multiplayer Game Server running on ws://127.0.0.1:19130');
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+});
