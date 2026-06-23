@@ -8,6 +8,13 @@ const MAX_STACK_SIZE = 64;
 const STARTER_BLOCKS = ['grass', 'dirt', 'stone', 'wood'];
 const STARTER_BLOCK_COUNT = 32;
 
+const ITEM_MAPPING = {
+    1: 'grass',
+    2: 'stone',
+    3: 'wood',
+    4: 'dirt'
+};
+
 const server = http.createServer((req, res) => {
     res.writeHead(200);
     res.end('WebSocket Server Running');
@@ -133,7 +140,19 @@ wss.on('connection', (ws) => {
                     break;
 
                 case 'PlayerPosition':
-                    if (players[playerId]) {
+                    if (players[playerId] && !players[playerId].fly) {
+                        Object.assign(players[playerId], {
+                            x: packet.x,
+                            y: packet.y,
+                            z: packet.z,
+                            yaw: packet.yaw,
+                            pitch: packet.pitch
+                        });
+                    }
+                    break;
+
+                case 'PlayerFlyMove':
+                    if (players[playerId] && players[playerId].fly) {
                         Object.assign(players[playerId], {
                             x: packet.x,
                             y: packet.y,
@@ -226,6 +245,38 @@ wss.on('connection', (ws) => {
                     }
                     break;
 
+                case 'PlayerAddItem':
+                    if (packet.playerid && packet.itemid) {
+                        const targetPlayer = players[packet.playerid];
+                        if (targetPlayer) {
+                            const blockType = ITEM_MAPPING[packet.itemid];
+                            if (blockType) {
+                                if (!targetPlayer.inventory) {
+                                    targetPlayer.inventory = {};
+                                }
+                                if (!targetPlayer.inventory[blockType]) {
+                                    targetPlayer.inventory[blockType] = {
+                                        count: 0,
+                                        maxCount: MAX_STACK_SIZE
+                                    };
+                                }
+                                const slot = targetPlayer.inventory[blockType];
+                                const addCount = packet.count !== undefined ? packet.count : 1;
+                                slot.count = Math.min(slot.count + addCount, slot.maxCount);
+
+                                wss.clients.forEach((client) => {
+                                    if (client.readyState === 1 && client.playerId === packet.playerid) {
+                                        sendToClient(client, {
+                                            type: 'SyncPlayerInventory',
+                                            inventory: buildInventorySnapshot(packet.playerid)
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    break;
+
                 case 'ChatCommand':
                     if (players[playerId] && players[playerId].command) {
                         const cmdText = packet.command;
@@ -262,6 +313,28 @@ wss.on('connection', (ws) => {
                                         z: tz,
                                         fly: players[playerId].fly,
                                         command: players[playerId].command
+                                    });
+                                }
+                            } else if (parts[1] === 'ai') {
+                                const itemId = parseInt(parts[2]);
+                                const itemCount = parseInt(parts[3]) || 1;
+                                const blockType = ITEM_MAPPING[itemId];
+                                if (blockType && !isNaN(itemCount)) {
+                                    if (!players[playerId].inventory) {
+                                        players[playerId].inventory = {};
+                                    }
+                                    if (!players[playerId].inventory[blockType]) {
+                                        players[playerId].inventory[blockType] = {
+                                            count: 0,
+                                            maxCount: MAX_STACK_SIZE
+                                        };
+                                    }
+                                    const slot = players[playerId].inventory[blockType];
+                                    slot.count = Math.min(slot.count + itemCount, slot.maxCount);
+
+                                    sendToClient(ws, {
+                                        type: 'SyncPlayerInventory',
+                                        inventory: buildInventorySnapshot(playerId)
                                     });
                                 }
                             }
