@@ -1,45 +1,118 @@
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 19130;
+const TICK_INTERVAL_MS = 50;
+const MAX_STACK_SIZE = 64;
+
+const STARTER_BLOCKS = ['grass', 'dirt', 'stone', 'wood'];
+const STARTER_BLOCK_COUNT = 32;
+
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('WebSocket Server Running');
+});
+
+const wss = new WebSocketServer({ server });
+
 const players = {};
 const world = {};
 
 function initWorld() {
-    for (let x = -24; x < 24; x++) {
-        for (let z = -24; z < 24; z++) {
-            world[`${x},0,${z}`] = 'stone';
-            world[`${x},1,${z}`] = 'dirt';
-            world[`${x},2,${z}`] = 'grass';
+    for (let x = -12; x < 12; x++) {
+        for (let z = -12; z < 12; z++) {
+            const height = Math.floor(Math.sin(x * 0.15) * Math.cos(z * 0.15) * 3 + 4);
+            for (let y = 0; y <= height; y++) {
+                const type = y === height ? 'grass' : (y > height - 3 ? 'dirt' : 'stone');
+                world[`${x},${y},${z}`] = type;
+            }
         }
     }
 }
+
 initWorld();
+
+function createStarterInventory() {
+    const inventory = {};
+    for (const blockType of STARTER_BLOCKS) {
+        inventory[blockType] = {
+            count: STARTER_BLOCK_COUNT,
+            maxCount: MAX_STACK_SIZE
+        };
+    }
+    return inventory;
+}
+
+function buildWorldSnapshot() {
+    return { ...world };
+}
+
+function buildPlayerListSnapshot() {
+    return Object.keys(players).map(id => ({ id, ...players[id] }));
+}
+
+function buildInventorySnapshot(playerId) {
+    const player = players[playerId];
+    if (!player || !player.inventory) return null;
+
+    const snapshot = {};
+    for (const blockType of Object.keys(player.inventory)) {
+        const slot = player.inventory[blockType];
+        snapshot[blockType] = {
+            count: slot.count,
+            maxCount: slot.maxCount
+        };
+    }
+    return snapshot;
+}
+
+function sendToClient(ws, data) {
+    if (ws.readyState === 1) {
+        ws.send(JSON.stringify(data));
+    }
+}
+
+function broadcast(data, excludePlayerId = null) {
+    const payload = JSON.stringify(data);
+
+    wss.clients.forEach((client) => {
+        if (client.readyState !== 1) return;
+        if (excludePlayerId && client.playerId === excludePlayerId) return;
+        client.send(payload);
+    });
+}
 
 wss.on('connection', (ws) => {
     const playerId = Math.random().toString(36).substring(2, 9);
+    ws.playerId = playerId;
+
+    console.log('Client connected:', playerId);
 
     ws.on('message', (message) => {
         try {
             const packet = JSON.parse(message);
+
             switch (packet.type) {
                 case 'Handshake':
-                    players[playerId] = { 
-                        x: 0.5, 
-                        y: 14.61, 
-                        z: 0.5, 
-                        yaw: 0, 
-                        pitch: 0, 
+                    players[playerId] = {
+                        x: 0.5,
+                        y: 16.61,
+                        z: 0.5,
+                        yaw: 0,
+                        pitch: 0,
                         activeBlock: 'grass',
-                        name: packet.name 
+                        name: packet.name,
+                        inventory: createStarterInventory(),
+                        command: true,
+                        fly: false
                     };
 
-                    ws.send(JSON.stringify({
+                    sendToClient(ws, {
                         type: 'PlayerJoin',
                         id: playerId,
-                        world: world,
-                        players: Object.keys(players).map(id => ({ id, ...players[id] }))
-                    }));
+                        world: buildWorldSnapshot(),
+                        players: buildPlayerListSnapshot()
+                    });
 
                     broadcast({
                         type: 'PlayerJoin',
@@ -48,19 +121,26 @@ wss.on('connection', (ws) => {
                     }, playerId);
 
                     broadcast({
-                        type: 'PlayerName',
+                        type: 'SyncPlayerName',
                         id: playerId,
                         name: packet.name
+                    });
+
+                    sendToClient(ws, {
+                        type: 'SyncPlayerInventory',
+                        inventory: buildInventorySnapshot(playerId)
                     });
                     break;
 
                 case 'PlayerPosition':
                     if (players[playerId]) {
-                        players[playerId].x = packet.x;
-                        players[playerId].y = packet.y;
-                        players[playerId].z = packet.z;
-                        players[playerId].yaw = packet.yaw;
-                        players[playerId].pitch = packet.pitch;
+                        Object.assign(players[playerId], {
+                            x: packet.x,
+                            y: packet.y,
+                            z: packet.z,
+                            yaw: packet.yaw,
+                            pitch: packet.pitch
+                        });
                     }
                     break;
 
@@ -69,27 +149,67 @@ wss.on('connection', (ws) => {
                     break;
 
                 case 'PlayerPlaceBlock':
-                    world[`${packet.x},${packet.y},${packet.z}`] = packet.blockType;
-                    broadcast({
-                        type: 'PlayerPlaceBlock',
-                        x: packet.x,
-                        y: packet.y,
-                        z: packet.z,
-                        blockType: packet.blockType
-                    });
+                    if (players[playerId]) {
+                        const key = `${packet.x},${packet.y},${packet.z}`;
+                        const blockType = packet.blockType;
+                        const slot = players[playerId].inventory && players[playerId].inventory[blockType];
+
+                        if (slot && slot.count > 0 && !world[key]) {
+                            world[key] = blockType;
+                            slot.count -= 1;
+
+                            broadcast({
+                                type: 'PlayerPlaceBlock',
+                                x: packet.x,
+                                y: packet.y,
+                                z: packet.z,
+                                blockType: blockType
+                            });
+
+                            sendToClient(ws, {
+                                type: 'SyncPlayerInventory',
+                                inventory: buildInventorySnapshot(playerId)
+                              });
+                        }
+                    }
                     break;
 
                 case 'PlayerBreakBlock':
-                    delete world[`${packet.x},${packet.y},${packet.z}`];
-                    broadcast({
-                        type: 'PlayerBreakBlock',
-                        x: packet.x,
-                        y: packet.y,
-                        z: packet.z
-                    });
+                    if (players[playerId]) {
+                        const key = `${packet.x},${packet.y},${packet.z}`;
+                        const blockType = world[key];
+
+                        if (blockType) {
+                            delete world[key];
+
+                            if (!players[playerId].inventory) players[playerId].inventory = {};
+                            const slot = players[playerId].inventory[blockType];
+
+                            if (slot) {
+                                slot.count = Math.min(slot.count + 1, slot.maxCount);
+                            } else {
+                                players[playerId].inventory[blockType] = {
+                                    count: 1,
+                                    maxCount: MAX_STACK_SIZE
+                                };
+                            }
+
+                            broadcast({
+                                type: 'PlayerBreakBlock',
+                                x: packet.x,
+                                y: packet.y,
+                                z: packet.z
+                            });
+
+                            sendToClient(ws, {
+                                type: 'SyncPlayerInventory',
+                                inventory: buildInventorySnapshot(playerId)
+                            });
+                        }
+                    }
                     break;
 
-                case 'PlayerInventory':
+                case 'PlayerSelectSlot':
                     if (players[playerId]) {
                         players[playerId].activeBlock = packet.activeBlock;
                     }
@@ -105,6 +225,49 @@ wss.on('connection', (ws) => {
                         });
                     }
                     break;
+
+                case 'ChatCommand':
+                    if (players[playerId] && players[playerId].command) {
+                        const cmdText = packet.command;
+                        const parts = cmdText.trim().split(/\s+/);
+                        if (parts[0] === '/player') {
+                            if (parts[1] === 'fly') {
+                                if (parts[2] === 'on') {
+                                    players[playerId].fly = true;
+                                    sendToClient(ws, {
+                                        type: 'SyncPlayerData',
+                                        fly: true,
+                                        command: players[playerId].command
+                                    });
+                                } else if (parts[2] === 'off') {
+                                    players[playerId].fly = false;
+                                    sendToClient(ws, {
+                                        type: 'SyncPlayerData',
+                                        fly: false,
+                                        command: players[playerId].command
+                                    });
+                                }
+                            } else if (parts[1] === 'tp') {
+                                const tx = parseFloat(parts[2]);
+                                const ty = parseFloat(parts[3]);
+                                const tz = parseFloat(parts[4]);
+                                if (!isNaN(tx) && !isNaN(ty) && !isNaN(tz)) {
+                                    players[playerId].x = tx;
+                                    players[playerId].y = ty;
+                                    players[playerId].z = tz;
+                                    sendToClient(ws, {
+                                        type: 'SyncPlayerData',
+                                        x: tx,
+                                        y: ty,
+                                        z: tz,
+                                        fly: players[playerId].fly,
+                                        command: players[playerId].command
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    break;
             }
         } catch (e) {
             console.error(e);
@@ -113,27 +276,17 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         delete players[playerId];
-        broadcast({ type: 'leave', id: playerId });
+        broadcast({ type: 'PlayerLeave', id: playerId });
     });
 });
 
-function broadcast(data, excludeId = null) {
-    const payload = JSON.stringify(data);
-    wss.clients.forEach((client) => {
-        if (client.readyState === 1) {
-            client.send(payload);
-        }
-    });
-}
-
 setInterval(() => {
-    const tickData = {
+    broadcast({
         type: 'Tick',
-        players: Object.keys(players).map(id => ({ id, ...players[id] }))
-    };
-    broadcast(tickData);
-}, 50);
+        players: buildPlayerListSnapshot()
+    });
+}, TICK_INTERVAL_MS);
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on 0.0.0.0:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
