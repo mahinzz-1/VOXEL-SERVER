@@ -1,7 +1,9 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { WebSocketServer } = require('ws');
 
-const PORT = process.env.PORT || 19130;
+const PORT = 19130;
 const TICK_INTERVAL_MS = 50;
 const MAX_STACK_SIZE = 64;
 
@@ -12,12 +14,26 @@ const ITEM_MAPPING = {
     1: 'grass',
     2: 'stone',
     3: 'wood',
-    4: 'dirt'
+    4: 'dirt',
+    5: 'sword'
 };
 
+const indexHtmlPath = path.join(__dirname, 'index.html');
+let indexHtmlContent = '<html><body>index.html not found next to lobby.js</body></html>';
+try {
+    indexHtmlContent = fs.readFileSync(indexHtmlPath, 'utf8');
+} catch (loadErr) {
+    console.error('Could not load index.html:', loadErr.message);
+}
+
 const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('WebSocket Server Running');
+    if (req.url === '/' || req.url === '/index.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(indexHtmlContent);
+    } else {
+        res.writeHead(404);
+        res.end('Not found');
+    }
 });
 
 const wss = new WebSocketServer({ server });
@@ -47,6 +63,7 @@ function createStarterInventory() {
             maxCount: MAX_STACK_SIZE
         };
     }
+    inventory['sword'] = { count: 1, maxCount: 1 };
     return inventory;
 }
 
@@ -63,9 +80,9 @@ function buildInventorySnapshot(playerId) {
     if (!player || !player.inventory) return null;
 
     const snapshot = {};
-    for (const blockType of Object.keys(player.inventory)) {
-        const slot = player.inventory[blockType];
-        snapshot[blockType] = {
+    for (const itemType of Object.keys(player.inventory)) {
+        const slot = player.inventory[itemType];
+        snapshot[itemType] = {
             count: slot.count,
             maxCount: slot.maxCount
         };
@@ -79,9 +96,8 @@ function sendToClient(ws, data) {
     }
 }
 
-function broadcast(data, excludePlayerId = null) {
+function broadcast(data, excludePlayerId) {
     const payload = JSON.stringify(data);
-
     wss.clients.forEach((client) => {
         if (client.readyState !== 1) return;
         if (excludePlayerId && client.playerId === excludePlayerId) return;
@@ -93,7 +109,7 @@ wss.on('connection', (ws) => {
     const playerId = Math.random().toString(36).substring(2, 9);
     ws.playerId = playerId;
 
-    console.log('Client connected:', playerId);
+    console.log('Lobby client connected:', playerId);
 
     ws.on('message', (message) => {
         try {
@@ -109,16 +125,19 @@ wss.on('connection', (ws) => {
                         pitch: 0,
                         activeBlock: 'grass',
                         name: packet.name,
-                        inventory: createStarterInventory(),
+                        health: 20,
                         command: true,
-                        fly: false
+                        fly: false,
+                        team: 'lobby',
+                        inventory: createStarterInventory()
                     };
 
                     sendToClient(ws, {
                         type: 'PlayerJoin',
                         id: playerId,
                         world: buildWorldSnapshot(),
-                        players: buildPlayerListSnapshot()
+                        players: buildPlayerListSnapshot(),
+                        serverType: 'lobby'
                     });
 
                     broadcast({
@@ -136,6 +155,14 @@ wss.on('connection', (ws) => {
                     sendToClient(ws, {
                         type: 'SyncPlayerInventory',
                         inventory: buildInventorySnapshot(playerId)
+                    });
+
+                    sendToClient(ws, {
+                        type: 'SyncPlayerData',
+                        health: 20,
+                        fly: false,
+                        command: true,
+                        team: 'lobby'
                     });
                     break;
 
@@ -173,7 +200,7 @@ wss.on('connection', (ws) => {
                         const blockType = packet.blockType;
                         const slot = players[playerId].inventory && players[playerId].inventory[blockType];
 
-                        if (slot && slot.count > 0 && !world[key]) {
+                        if (slot && slot.count > 0 && !world[key] && blockType !== 'sword') {
                             world[key] = blockType;
                             slot.count -= 1;
 
@@ -188,7 +215,7 @@ wss.on('connection', (ws) => {
                             sendToClient(ws, {
                                 type: 'SyncPlayerInventory',
                                 inventory: buildInventorySnapshot(playerId)
-                              });
+                            });
                         }
                     }
                     break;
@@ -257,7 +284,7 @@ wss.on('connection', (ws) => {
                                 if (!targetPlayer.inventory[blockType]) {
                                     targetPlayer.inventory[blockType] = {
                                         count: 0,
-                                        maxCount: MAX_STACK_SIZE
+                                        maxCount: blockType === 'sword' ? 1 : MAX_STACK_SIZE
                                     };
                                 }
                                 const slot = targetPlayer.inventory[blockType];
@@ -277,6 +304,12 @@ wss.on('connection', (ws) => {
                     }
                     break;
 
+                case 'PlayerHit':
+                    break;
+
+                case 'PlayerDeath':
+                    break;
+
                 case 'ChatCommand':
                     if (players[playerId] && players[playerId].command) {
                         const cmdText = packet.command;
@@ -288,14 +321,16 @@ wss.on('connection', (ws) => {
                                     sendToClient(ws, {
                                         type: 'SyncPlayerData',
                                         fly: true,
-                                        command: players[playerId].command
+                                        command: players[playerId].command,
+                                        team: players[playerId].team
                                     });
                                 } else if (parts[2] === 'off') {
                                     players[playerId].fly = false;
                                     sendToClient(ws, {
                                         type: 'SyncPlayerData',
                                         fly: false,
-                                        command: players[playerId].command
+                                        command: players[playerId].command,
+                                        team: players[playerId].team
                                     });
                                 }
                             } else if (parts[1] === 'tp') {
@@ -312,7 +347,8 @@ wss.on('connection', (ws) => {
                                         y: ty,
                                         z: tz,
                                         fly: players[playerId].fly,
-                                        command: players[playerId].command
+                                        command: players[playerId].command,
+                                        team: players[playerId].team
                                     });
                                 }
                             } else if (parts[1] === 'ai') {
@@ -326,7 +362,7 @@ wss.on('connection', (ws) => {
                                     if (!players[playerId].inventory[blockType]) {
                                         players[playerId].inventory[blockType] = {
                                             count: 0,
-                                            maxCount: MAX_STACK_SIZE
+                                            maxCount: blockType === 'sword' ? 1 : MAX_STACK_SIZE
                                         };
                                     }
                                     const slot = players[playerId].inventory[blockType];
@@ -361,5 +397,5 @@ setInterval(() => {
 }, TICK_INTERVAL_MS);
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Lobby server running on port ${PORT}`);
 });
